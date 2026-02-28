@@ -1,6 +1,7 @@
 """Core RLM implementation."""
 
 import asyncio
+import logging
 import re
 from typing import Optional, Dict, Any, List
 
@@ -10,6 +11,9 @@ from .types import Message
 from .repl import REPLExecutor, REPLError
 from .prompts import build_system_prompt
 from .parser import parse_response, is_final
+from .wiki import Wiki
+
+logger = logging.getLogger(__name__)
 
 
 class RLMError(Exception):
@@ -39,6 +43,7 @@ class RLM:
         max_depth: int = 5,
         max_iterations: int = 30,
         _current_depth: int = 0,
+        _wiki: Optional[Wiki] = None,
         **llm_kwargs: Any
     ):
         """
@@ -52,6 +57,7 @@ class RLM:
             max_depth: Maximum recursion depth
             max_iterations: Maximum REPL iterations per call
             _current_depth: Internal current depth tracker
+            _wiki: Internal shared wiki instance (for recursive calls)
             **llm_kwargs: Additional LiteLLM parameters
         """
         self.model = model
@@ -65,9 +71,17 @@ class RLM:
 
         self.repl = REPLExecutor()
 
+        # Wiki (shared across recursive calls)
+        self._wiki: Optional[Wiki] = _wiki
+
         # Stats
         self._llm_calls = 0
         self._iterations = 0
+
+        logger.info(
+            "RLM initialized: model=%s, recursive_model=%s, max_depth=%d, max_iterations=%d, depth=%d",
+            self.model, self.recursive_model, self.max_depth, self.max_iterations, self._current_depth,
+        )
 
     def complete(
         self,
@@ -139,7 +153,13 @@ class RLM:
             context = query
             query = ""
         if self._current_depth >= self.max_depth:
+            logger.warning("Max recursion depth (%d) exceeded", self.max_depth)
             raise MaxDepthError(f"Max recursion depth ({self.max_depth}) exceeded")
+
+        logger.info(
+            "[depth=%d] Starting completion: query=%r, context_length=%d chars",
+            self._current_depth, query[:80] + ("..." if len(query) > 80 else ""), len(context),
+        )
 
         # Initialize REPL environment
         repl_env = self._build_repl_env(query, context)
@@ -154,28 +174,42 @@ class RLM:
         # Main loop
         for iteration in range(self.max_iterations):
             self._iterations = iteration + 1
+            if self._wiki:
+                self._wiki.set_iteration(iteration + 1)
+            logger.info("[depth=%d] --- Iteration %d/%d ---", self._current_depth, iteration + 1, self.max_iterations)
 
             # Call LLM
             response = await self._call_llm(messages, **kwargs)
+            logger.debug("[depth=%d] LLM response:\n%s", self._current_depth, response)
 
             # Check for FINAL
             if is_final(response):
                 answer = parse_response(response, repl_env)
                 if answer is not None:
+                    logger.info(
+                        "[depth=%d] FINAL answer after %d iterations, %d LLM calls: %s",
+                        self._current_depth, iteration + 1, self._llm_calls,
+                        (answer[:120] + "...") if len(answer) > 120 else answer,
+                    )
                     return answer
 
             # Execute code in REPL
             try:
                 exec_result = self.repl.execute(response, repl_env)
+                logger.info("[depth=%d] REPL result: %s", self._current_depth,
+                            (exec_result[:200] + "...") if len(exec_result) > 200 else exec_result)
             except REPLError as e:
                 exec_result = f"Error: {str(e)}"
+                logger.warning("[depth=%d] REPL error: %s", self._current_depth, e)
             except Exception as e:
                 exec_result = f"Unexpected error: {str(e)}"
+                logger.warning("[depth=%d] Unexpected REPL error: %s", self._current_depth, e)
 
             # Add to conversation
             messages.append({"role": "assistant", "content": response})
             messages.append({"role": "user", "content": exec_result})
 
+        logger.error("[depth=%d] Max iterations (%d) exceeded without FINAL()", self._current_depth, self.max_iterations)
         raise MaxIterationsError(
             f"Max iterations ({self.max_iterations}) exceeded without FINAL()"
         )
@@ -210,6 +244,9 @@ class RLM:
         if self.api_key:
             call_kwargs['api_key'] = self.api_key
 
+        logger.info("[depth=%d] Calling LLM #%d: model=%s, messages=%d", self._current_depth, self._llm_calls, model, len(messages))
+        logger.debug("[depth=%d] LLM call kwargs: %s", self._current_depth, {k: v for k, v in call_kwargs.items() if k != 'api_key'})
+
         # Call LiteLLM
         response = await litellm.acompletion(
             model=model,
@@ -218,7 +255,17 @@ class RLM:
         )
 
         # Extract text
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        usage = getattr(response, 'usage', None)
+        if usage:
+            logger.info(
+                "[depth=%d] LLM response: %d chars (prompt_tokens=%s, completion_tokens=%s)",
+                self._current_depth, len(content),
+                getattr(usage, 'prompt_tokens', '?'), getattr(usage, 'completion_tokens', '?'),
+            )
+        else:
+            logger.info("[depth=%d] LLM response: %d chars", self._current_depth, len(content))
+        return content
 
     def _build_repl_env(self, query: str, context: str) -> Dict[str, Any]:
         """
@@ -231,11 +278,16 @@ class RLM:
         Returns:
             Environment dict
         """
+        # Create wiki if this is the root call (no shared wiki passed in)
+        if self._wiki is None:
+            self._wiki = Wiki()
+
         env: Dict[str, Any] = {
             'context': context,
             'query': query,
             'recursive_llm': self._make_recursive_fn(),
             're': re,  # Whitelist re module
+            'wiki': self._wiki,
         }
         return env
 
@@ -257,10 +309,16 @@ class RLM:
             Returns:
                 Answer from recursive call
             """
-            if self._current_depth + 1 >= self.max_depth:
+            new_depth = self._current_depth + 1
+            logger.info(
+                "[depth=%d] Recursive call -> depth %d: query=%r, sub_context_length=%d chars",
+                self._current_depth, new_depth, sub_query[:80], len(sub_context),
+            )
+            if new_depth >= self.max_depth:
+                logger.warning("[depth=%d] Recursive call blocked: max depth %d reached", self._current_depth, self.max_depth)
                 return f"Max recursion depth ({self.max_depth}) reached"
 
-            # Create sub-RLM with increased depth
+            # Create sub-RLM with increased depth, sharing the wiki
             sub_rlm = RLM(
                 model=self.recursive_model,
                 recursive_model=self.recursive_model,
@@ -268,11 +326,18 @@ class RLM:
                 api_key=self.api_key,
                 max_depth=self.max_depth,
                 max_iterations=self.max_iterations,
-                _current_depth=self._current_depth + 1,
+                _current_depth=new_depth,
+                _wiki=self._wiki,
                 **self.llm_kwargs
             )
 
-            return await sub_rlm.acomplete(sub_query, sub_context)
+            result = await sub_rlm.acomplete(sub_query, sub_context)
+            logger.info(
+                "[depth=%d] Recursive call (depth %d) returned: %s",
+                self._current_depth, new_depth,
+                (result[:120] + "...") if len(result) > 120 else result,
+            )
+            return result
 
         # Wrap in sync function for REPL compatibility
         def sync_recursive_llm(sub_query: str, sub_context: str) -> str:
@@ -294,6 +359,11 @@ class RLM:
                 return asyncio.run(recursive_llm(sub_query, sub_context))
 
         return sync_recursive_llm
+
+    @property
+    def wiki(self) -> Optional[Wiki]:
+        """Access the wiki instance for post-completion inspection."""
+        return self._wiki
 
     @property
     def stats(self) -> Dict[str, int]:

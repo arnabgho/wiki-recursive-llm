@@ -4,309 +4,131 @@ Python implementation of Recursive Language Models for processing unbounded cont
 
 **Based on [the paper](https://alexzhang13.github.io/blog/2025/rlm/) by Alex Zhang and Omar Khattab (MIT, 2025)** | [arXiv](https://arxiv.org/abs/2512.24601)
 
-
 ## What is RLM?
 
 RLM enables language models to process extremely long contexts (100k+ tokens) by:
 - Storing context as a Python variable instead of in the prompt
 - Allowing the LM to recursively explore and partition the context
-- Avoiding "context rot" (performance degradation with long context)
-
-Instead of this:
-```python
-llm.complete(prompt="Summarize this", context=huge_document)  # Context rot!
-```
-
-RLM does this:
-```python
-rlm = RLM(model="gpt-5-mini")
-result = rlm.complete(
-    query="Summarize this",
-    context=huge_document  # Stored as variable, not in prompt
-)
-```
-
-The LM can then peek, search, and recursively process the context adaptively.
+- Providing a **wiki knowledge base** for the agent to organize findings across iterations
 
 ## Installation
 
-**Note:** This package is not yet published to PyPI. Install from source:
-
 ```bash
-# Clone the repository
 git clone https://github.com/ysz/recursive-llm.git
 cd recursive-llm
-
-# Install in editable mode
 pip install -e .
-
-# Or install with dev dependencies
-pip install -e ".[dev]"
 ```
 
-**Future:** Once published to PyPI, you'll be able to install with `pip install recursive-llm`
-
-## Requirements
-
-- Python 3.9 or higher
-- An API key for your chosen LLM provider (OpenAI, Anthropic, etc.)
-- Or a local model setup (Ollama, llama.cpp, etc.)
-
 ## Quick Start
+
+```bash
+export OPENAI_API_KEY="sk-..."
+python examples/basic_usage.py
+```
 
 ```python
 from rlm import RLM
 
-# Initialize with any LLM
-rlm = RLM(model="gpt-5-mini")
+rlm = RLM(model="gpt-5.2-codex", max_iterations=25)
 
-# Process long context
 result = rlm.complete(
-    query="What are the main themes in this document?",
+    query="What are the key milestones in AI development?",
     context=long_document
 )
 print(result)
+print(rlm.stats)
 ```
 
-## API Keys Setup
+## Wiki Knowledge System
 
-Set your API key via environment variable or pass it directly:
+RLM includes a built-in wiki that the agent uses to organize its findings during exploration. Pages support tags, cross-references, and BM25 search.
 
-```bash
-export OPENAI_API_KEY="sk-..."  # or ANTHROPIC_API_KEY, etc.
-```
-
-Or pass directly in code:
-```python
-rlm = RLM(model="gpt-5-mini", api_key="sk-...")
-```
-
-## Supported Models
-
-Works with 100+ LLM providers via LiteLLM:
+### Verify the wiki works
 
 ```python
-# OpenAI
-rlm = RLM(model="gpt-5")
-rlm = RLM(model="gpt-5-mini")
+from rlm import Wiki
 
-# Anthropic
-rlm = RLM(model="claude-sonnet-4")
-rlm = RLM(model="claude-sonnet-4-20250514")
+wiki = Wiki()
 
-# Ollama (local)
-rlm = RLM(model="ollama/llama3.2")
-rlm = RLM(model="ollama/mistral")
+# Create pages
+wiki.create("revenue/q1", "Q1 revenue was $10M, up 15% YoY", tags={"finding"})
+wiki.create("revenue/q2", "Q2 revenue was $12M, up 20% YoY", tags={"finding"})
+wiki.create("tasks/verify", "Need to cross-check Q2 numbers", tags={"todo"})
 
-# llama.cpp (local)
-rlm = RLM(
-    model="openai/local",
-    api_base="http://localhost:8000/v1"
-)
+# Link related pages
+wiki.link("tasks/verify", "revenue/q2")
 
-# Azure OpenAI
-rlm = RLM(model="azure/gpt-4-deployment")
+# Search
+print(wiki.search("revenue"))
+# [('revenue/q1', 1.029, '...'), ('revenue/q2', 1.029, '...')]
 
-# And many more via LiteLLM...
+# Table of contents
+print(wiki.toc())
+# Wiki: 3 pages
+#   revenue/q1         [finding]  (iter 0)
+#   revenue/q2         [finding]  (iter 0)
+#   tasks/verify       [todo]    (iter 0)
+
+# Backlinks
+print(wiki.backlinks("revenue/q2"))
+# ['tasks/verify']
+
+# Tags
+print(wiki.search_tags("todo"))
+# ['tasks/verify']
+
+# Export (JSON-serializable, used by web viewer)
+print(wiki.export())
 ```
 
-## Advanced Usage
+### Web Viewer
 
-### Two Models (Optimize Cost)
-
-Use a cheaper model for recursive calls:
+Browse the wiki in real time while the agent runs:
 
 ```python
-rlm = RLM(
-    model="gpt-5",              # Root LM (main decisions)
-    recursive_model="gpt-5-mini"  # Recursive calls (cheaper)
-)
+from rlm import RLM
+from rlm.web import serve_wiki
+
+rlm = RLM(model="gpt-5.2-codex")
+serve_wiki(rlm, port=8787)  # http://127.0.0.1:8787
+
+result = rlm.complete(query="...", context=document)
 ```
 
-### Async API
+The viewer shows a page sidebar (grouped by path prefix, filterable), page content with tags and links, a force-directed link graph, and live stats — all auto-refreshing every 2 seconds.
 
-For better performance with parallel recursive calls:
+### How the agent uses the wiki
+
+The wiki object is injected into the REPL environment. The agent sees it documented in its system prompt and can call any method:
 
 ```python
-import asyncio
-
-async def main():
-    rlm = RLM(model="gpt-5-mini")
-    result = await rlm.acomplete(query, context)
-    print(result)
-
-asyncio.run(main())
+wiki.create("summary", "Key findings so far...", tags=set(["finding"]))
+wiki.update("summary", append="\n- New data point")
+wiki.search("quarterly revenue")
+wiki.toc()
 ```
 
-### Configuration
-
-```python
-rlm = RLM(
-    model="gpt-5-mini",
-    max_depth=5,         # Maximum recursion depth
-    max_iterations=20,   # Maximum REPL iterations
-    # Optional LiteLLM params: temperature, timeout, etc.
-)
-```
-
-## How It Works
-
-1. **Context is stored as a variable** in a Python REPL environment
-2. **Root LM gets only the query** plus instructions
-3. **LM can explore context** using Python code:
-   ```python
-   # Peek at context
-   context[:1000]
-
-   # Search with regex
-   import re
-   re.findall(r'pattern', context)
-
-   # Recursive processing
-   recursive_llm("extract dates", context[1000:2000])
-   ```
-4. **Returns final answer** via `FINAL(answer)` statement
-
-## Examples
-
-See the `examples/` directory for complete working examples:
-- `basic_usage.py` - Simple complete with OpenAI
-- `ollama_local.py` - Using Ollama locally
-- `two_models.py` - Cost optimization with two models
-- `long_document.py` - Processing 50k+ token documents
-- `data_extraction.py` - Extract structured data from text
-- `multi_file.py` - Process multiple documents
-- `custom_config.py` - Advanced configuration
-
-Run an example:
-```bash
-# Set your API key first
-export OPENAI_API_KEY="sk-..."
-
-# Run example
-python examples/basic_usage.py
-```
-
-## Performance
-
-### Paper Results
-
-On OOLONG benchmark (132k tokens):
-- GPT-5: baseline
-- RLM(GPT-5-Mini): **33% better than GPT-5** at similar cost
-
-### Our Benchmark Results
-
-Tested with GPT-5-Mini on structured data queries (counting, filtering) across 5 different test cases:
-
-**60k token contexts:**
-- **RLM**: 80% accurate (4/5 correct)
-- **Direct OpenAI**: 0% accurate (0/5 correct, all returned approximations)
-
-RLM wins on accuracy. Both complete requests, but only RLM gives correct answers.
-
-**150k+ token contexts:**
-- **Direct OpenAI**: Fails (rate limit errors)
-- **RLM**: Works (processes 1M+ tokens successfully)
-
-**Token efficiency:** RLM uses ~2-3k tokens per query vs 95k+ for direct approach, since context is stored as a variable instead of being sent in prompts.
-
-## Development
-
-```bash
-# Clone repository
-git clone https://github.com/ysz/recursive-llm.git
-cd recursive-llm
-
-# Install with dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest tests/ -v
-
-# Run tests with coverage
-pytest tests/ -v --cov=src/rlm --cov-report=term-missing
-
-# Type checking
-mypy src/rlm
-
-# Linting
-ruff check src/rlm
-
-# Format code
-black src/rlm tests examples
-```
+The wiki is shared across recursive calls, so a child agent's findings are visible to the parent.
 
 ## Architecture
 
 ```
 RLM
-├── Core (async completion logic)
-├── REPL Executor (safe code execution via RestrictedPython)
-├── Prompt Builder (system prompts)
+├── Core (async completion loop)
+├── REPL Executor (RestrictedPython sandbox)
+├── Wiki (BM25-indexed knowledge base, shared across depths)
+├── Web Viewer (stdlib HTTP server, single-page app)
+├── Prompt Builder (system prompts with wiki API docs)
 └── Parser (extract FINAL() answers)
 ```
 
-Built on top of LiteLLM for universal LLM support.
-
-## Limitations
-
-- REPL execution is sequential (no parallel code execution yet)
-- No prefix caching (future enhancement)
-- Recursion depth is limited (configurable via `max_depth`)
-- No streaming support yet
-
-## Troubleshooting
-
-### "Max iterations exceeded"
-- Increase `max_iterations` parameter
-- Simplify your query
-- Check if the model is getting stuck in a loop
-
-### "API key not found"
-- Set the appropriate environment variable (e.g., `OPENAI_API_KEY`)
-- Or pass `api_key` parameter to RLM constructor
-
-### "Model not found"
-- Check model name format for your provider
-- See LiteLLM docs: https://docs.litellm.ai/docs/providers
-
-### Using Ollama
-- Make sure Ollama is running: `ollama serve`
-- Pull a model first: `ollama pull llama3.2`
-- Use model format: `ollama/model-name`
-
-## Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new features
-4. Ensure all tests pass (`pytest tests/`)
-5. Follow code style (use `black` and `ruff`)
-6. Submit a pull request
-
 ## Citation
 
-This implementation is based on the RLM paper by Alex Zhang and Omar Khattab.
-
-**To cite this implementation:**
-```bibtex
-@software{rlm_python,
-  title = {recursive-llm: Python Implementation of Recursive Language Models},
-  author = {Gvadzabia, Grisha},
-  year = {2025},
-  url = {https://github.com/ysz/recursive-llm}
-}
-```
-
-**To cite the original paper:**
 ```bibtex
 @misc{zhang2025rlm,
   title = {Recursive Language Models},
   author = {Zhang, Alex and Khattab, Omar},
   year = {2025},
-  month = {October},
   url = {https://alexzhang13.github.io/blog/2025/rlm/},
   eprint = {2512.24601},
   archivePrefix = {arXiv}
@@ -315,19 +137,4 @@ This implementation is based on the RLM paper by Alex Zhang and Omar Khattab.
 
 ## License
 
-MIT License - see LICENSE file for details
-
-## Acknowledgments
-
-Based on the Recursive Language Models paper by Alex Zhang and Omar Khattab from MIT CSAIL.
-
-Built using:
-- LiteLLM for universal LLM API support
-- RestrictedPython for safe code execution
-
-## Links
-
-- **Paper**: https://alexzhang13.github.io/blog/2025/rlm/
-- **arXiv**: https://arxiv.org/abs/2512.24601
-- **LiteLLM Docs**: https://docs.litellm.ai/
-- **Issues**: https://github.com/ysz/recursive-llm/issues
+MIT

@@ -1,11 +1,14 @@
 """Safe REPL executor using RestrictedPython."""
 
 import io
+import logging
 import sys
 from typing import Dict, Any, Optional
 from RestrictedPython import compile_restricted_exec, safe_globals, limited_builtins, utility_builtins
 from RestrictedPython.Guards import guarded_iter_unpack_sequence, safer_getattr
 from RestrictedPython.PrintCollector import PrintCollector
+
+logger = logging.getLogger(__name__)
 
 
 class REPLError(Exception):
@@ -42,10 +45,17 @@ class REPLExecutor:
             REPLError: If code execution fails
         """
         # Filter out code blocks if present (LLM might wrap code)
+        raw_code = code
         code = self._extract_code(code)
 
+        if raw_code != code:
+            logger.debug("Extracted code from markdown block")
+
         if not code.strip():
+            logger.debug("No code to execute (empty after extraction)")
             return "No code to execute"
+
+        logger.debug("Executing code:\n%s", code)
 
         # Build restricted globals
         restricted_globals = self._build_globals(env)
@@ -94,12 +104,14 @@ class REPLExecutor:
 
             # Truncate output if too long (as per paper: "truncated version of output")
             if len(output) > self.max_output_chars:
+                logger.debug("Output truncated: %d chars -> %d chars", len(output), self.max_output_chars)
                 truncated = output[:self.max_output_chars]
                 return f"{truncated}\n\n[Output truncated: {len(output)} chars total, showing first {self.max_output_chars}]"
 
             return output.strip()
 
         except Exception as e:
+            logger.debug("REPL execution error: %s", e)
             raise REPLError(f"Execution error: {str(e)}")
 
         finally:
@@ -221,6 +233,7 @@ class REPLExecutor:
         import math
         from datetime import datetime, timedelta
         from collections import Counter, defaultdict
+        from .wiki import Wiki, WikiPage
 
         restricted_globals.update({
             're': re,               # Regex (read-only)
@@ -230,6 +243,8 @@ class REPLExecutor:
             'timedelta': timedelta, # Time deltas
             'Counter': Counter,     # Counting helper
             'defaultdict': defaultdict,  # Dict with defaults
+            'Wiki': Wiki,           # Wiki knowledge base class
+            'WikiPage': WikiPage,   # Wiki page dataclass
         })
 
         return restricted_globals

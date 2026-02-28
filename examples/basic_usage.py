@@ -1,8 +1,13 @@
 """Basic usage example for RLM."""
 
+import logging
 import os
 from dotenv import load_dotenv
 from rlm import RLM
+
+# Enable logging to see what RLM is doing under the hood
+# Use logging.DEBUG to also see full LLM responses and executed code
+logging.basicConfig(level=logging.DEBUG, format="%(name)s | %(levelname)s | %(message)s")
 
 # Load environment variables from .env file
 load_dotenv()
@@ -47,8 +52,8 @@ def main():
     # Initialize RLM with OpenAI (or any other provider)
     # You can also use "claude-sonnet-4", "ollama/llama3.2", etc.
     rlm = RLM(
-        model="gpt-5-mini",  # Use mini for cheaper testing
-        max_iterations=15,
+        model="gpt-5.2-codex",  # Use mini for cheaper testing
+        max_iterations=25,
         # temperature=0.7,  # Optional: not all models support this (e.g., gpt-5 only allows temperature=1)
     )
 

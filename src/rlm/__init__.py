@@ -2,6 +2,7 @@
 
 from .core import RLM, RLMError, MaxIterationsError, MaxDepthError
 from .repl import REPLError
+from .wiki import Wiki, WikiPage
 
 __version__ = "0.1.0"
 
@@ -11,4 +12,6 @@ __all__ = [
     "MaxIterationsError",
     "MaxDepthError",
     "REPLError",
+    "Wiki",
+    "WikiPage",
 ]
