@@ -35,19 +35,27 @@ Available in environment:
   - wiki.titles()  # list all page titles
   - wiki.backlinks(title)  # pages that link to this page
 
-Use the wiki to organize your work:
-- Create pages for findings, group by topic (e.g. "revenue/q1", "tasks/scan")
-- Tag pages: "finding", "todo", "done", "question"
-- Link related pages together
-- Check wiki.toc() to see what you already know before searching context again
-
 Write Python code to answer the query. The last expression or print() output will be shown to you.
+IMPORTANT: Your ENTIRE response must be valid Python code. Do NOT write plain text or narrative.
+Use print() to display text output. Use wiki.create() to store findings.
+
+ALWAYS use the wiki to record your findings as you go:
+- After each search/exploration, store results: wiki.create("topic", findings, tags=set(["finding"]))
+- Before answering, check wiki.toc() for what you already know
+- On FINAL: your wiki pages are your audit trail
 
 Examples:
-- print(context[:500])  # See first 500 chars
-- matches = re.findall(r'keyword.*', context); print(matches[:5])
-- idx = context.find('search term'); print(context[idx:idx+200])
-- wiki.create("summary", "Key findings so far...", tags=set(["finding"]))
+  print(context[:500])  # See first 500 chars
+  matches = re.findall(r'keyword.*', context); print(matches[:5])
+  idx = context.find('search term'); print(context[idx:idx+200])
+  wiki.create("summary", "Key findings so far...", tags=set(["finding"]))
+
+WRONG (plain text — will cause an error):
+  The key milestones are 1950, 1956...
+RIGHT (executable code):
+  print(context[:500])
+RIGHT (store findings):
+  wiki.create("milestones", result_text, tags=set(["finding"]))
 
 CRITICAL: Do NOT guess or make up answers. You MUST search the context first to find the actual information.
 Only use FINAL("answer") after you have found concrete evidence in the context.

@@ -69,6 +69,19 @@ class REPLExecutor:
             byte_code = compile_restricted_exec(code)
 
             if byte_code.errors:
+                # Check if this looks like plain text, not code
+                stripped = code.strip()
+                first_line = stripped.split('\n')[0]
+                looks_like_prose = not any(
+                    indicator in first_line
+                    for indicator in ['=', '(', 'import', 'print', 'for ', 'if ', 'def ', 'class ', '#']
+                )
+                if looks_like_prose:
+                    raise REPLError(
+                        "Your response is not valid Python code. "
+                        "You MUST respond with executable Python code only. "
+                        "Use print() to display text, e.g.: print('your answer here')"
+                    )
                 raise REPLError(f"Compilation error: {', '.join(byte_code.errors)}")
 
             # Execute

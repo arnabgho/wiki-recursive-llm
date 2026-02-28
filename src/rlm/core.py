@@ -184,6 +184,17 @@ class RLM:
 
             # Check for FINAL
             if is_final(response):
+                # Execute any code BEFORE the FINAL() statement
+                final_pos = response.find('FINAL(')
+                if final_pos < 0:
+                    final_pos = response.find('FINAL_VAR(')
+                code_before = response[:final_pos] if final_pos > 0 else ""
+                if code_before.strip():
+                    try:
+                        self.repl.execute(code_before, repl_env)
+                    except Exception:
+                        pass  # Best-effort; don't block the answer
+
                 answer = parse_response(response, repl_env)
                 if answer is not None:
                     logger.info(
@@ -191,6 +202,16 @@ class RLM:
                         self._current_depth, iteration + 1, self._llm_calls,
                         (answer[:120] + "...") if len(answer) > 120 else answer,
                     )
+                    # Auto-log final answer to wiki
+                    if self._wiki:
+                        try:
+                            self._wiki.create(
+                                "_log/final_answer",
+                                f"Iterations: {iteration + 1}\nLLM calls: {self._llm_calls}\n\n{answer}",
+                                tags={"_system", "done"},
+                            )
+                        except Exception:
+                            pass
                     return answer
 
             # Execute code in REPL
@@ -204,6 +225,10 @@ class RLM:
             except Exception as e:
                 exec_result = f"Unexpected error: {str(e)}"
                 logger.warning("[depth=%d] Unexpected REPL error: %s", self._current_depth, e)
+
+            # Auto-log this iteration to wiki for observability
+            if self._wiki:
+                self._auto_log_iteration(iteration + 1, response, exec_result)
 
             # Add to conversation
             messages.append({"role": "assistant", "content": response})
@@ -290,6 +315,33 @@ class RLM:
             'wiki': self._wiki,
         }
         return env
+
+    def _auto_log_iteration(self, iteration: int, response: str, exec_result: str) -> None:
+        """Auto-log an iteration to the wiki for observability.
+
+        Creates a per-iteration log page and maintains a rolling progress page.
+        All pages use the '_' prefix convention to signal system-generated content.
+        """
+        try:
+            # Per-iteration log page
+            page_title = f"_log/iter_{iteration:03d}"
+            response_snippet = response[:300] + ("..." if len(response) > 300 else "")
+            result_snippet = exec_result[:500] + ("..." if len(exec_result) > 500 else "")
+            log_content = f"## LLM Response\n{response_snippet}\n\n## REPL Result\n{result_snippet}"
+            self._wiki.create(page_title, log_content, tags={"_system"})
+        except Exception:
+            pass  # Don't let logging failures break the loop
+
+        try:
+            # Rolling progress page
+            one_line = exec_result.replace("\n", " ")[:80]
+            summary_line = f"- iter {iteration}: {one_line}\n"
+            if "_progress" in self._wiki.titles():
+                self._wiki.update("_progress", append=summary_line)
+            else:
+                self._wiki.create("_progress", summary_line, tags={"_system"})
+        except Exception:
+            pass
 
     def _make_recursive_fn(self) -> Any:
         """
